@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>CrossQ-3B 中期报告</title>
+<style>
+@page { size: A4; margin: 20mm 19mm 20mm 19mm; }
+body { font-family: "Noto Sans CJK SC", "Microsoft YaHei", "SimSun", sans-serif; color: #202a35; font-size: 10.5pt; line-height: 1.65; }
+h1, h2, h3 { color: #163a5a; page-break-after: avoid; }
+h1 { font-size: 25pt; line-height: 1.35; }
+h2 { font-size: 16pt; margin-top: 24pt; border-bottom: 1px solid #9bb2c5; padding-bottom: 4pt; }
+h3 { font-size: 12pt; margin-top: 15pt; }
+p { margin: 5pt 0 8pt; text-align: justify; }
+.cover { height: 245mm; display: flex; flex-direction: column; justify-content: center; page-break-after: always; }
+.cover .eyebrow { color: #56748d; font-size: 12pt; letter-spacing: 2pt; }
+.cover h1 { margin: 18pt 0; }
+.cover .subtitle { font-size: 15pt; color: #3c617d; }
+.cover .meta { margin-top: 45pt; line-height: 2; }
+.lead { background: #eef4f8; border-left: 4px solid #397399; padding: 10pt 13pt; margin: 12pt 0; }
+.callout { background: #f7f4e9; border-left: 4px solid #b28a37; padding: 8pt 12pt; margin: 10pt 0; }
+table { width: 100%; border-collapse: collapse; margin: 10pt 0 13pt; font-size: 8.7pt; page-break-inside: auto; }
+thead { display: table-header-group; }
+tr { page-break-inside: avoid; }
+th, td { border: 1px solid #9daebc; padding: 5pt 6pt; vertical-align: top; }
+th { background: #e7eef3; color: #183b58; text-align: center; }
+td.num { text-align: center; white-space: nowrap; }
+.small { font-size: 9pt; color: #4a5965; }
+.center { text-align: center; }
+.page-break { page-break-before: always; }
+ul, ol { margin-top: 5pt; padding-left: 22pt; }
+li { margin: 3pt 0; }
+.foot { border-top: 1px solid #b7c3cc; margin-top: 22pt; padding-top: 7pt; color: #53636e; font-size: 8.5pt; }
+</style>
+</head>
+<body>
+<section class="cover">
+  <div class="eyebrow">深度强化学习 · 中期检查</div>
+  <h1>CrossQ-3B<br>中期报告</h1>
+  <div class="subtitle">面向策略更新路径的三批联合前向与归一化统计共享</div>
+  <div class="meta">
+    <div><b>课题类型：</b>顶会论文复现与微创新</div>
+    <div><b>研究方向：</b>连续控制与深度强化学习</div>
+    <div><b>复现基线：</b>CrossQ（ICLR 2024）</div>
+    <div><b>实验环境：</b>Ant-v4、Hopper-v4、Walker2d-v4</div>
+    <div><b>小组成员：</b>梅振宇、金宇辉、沈乐乐、容子棋</div>
+    <div><b>报告日期：</b>2026 年 11 月 9 日</div>
+  </div>
+</section>
+
+<h2>摘要</h2>
+<p>本课题研究 CrossQ 评论家在策略更新时的归一化统计路径。标准 CrossQ 在评论家更新中把当前转移批与自举批拼成 2N 批共享当步 BatchNorm 统计量；策略损失所需的当前状态策略动作批通常另行前向，因而没有直接参与该次批统计估计。本研究据此提出可检验假设：在策略更新步把三类输入拼成 3N 批，可能改变策略梯度所依赖的归一化上下文，但效果不应预设为正向。</p>
+<p>截至本报告，已完成三种 MuJoCo 环境、五个配对随机种子、六种方法、每个 run 一百万交互步的主比较，共 90 个 run。Original 3B（无 EMA）在 Ant 的 Final、AUC 和 held-out 均值高于 CrossQ，在 Hopper 呈现指标分化，在 Walker2d 三项均低于 CrossQ；因此，单纯加入第三批没有显示跨环境一致收益。EMA、分阶段启用和双目标 TDEMA 的表现也依赖环境与评价指标。现阶段结论是：第三批统计共享值得研究，但不能据当前结果声称其普遍优于 CrossQ；主要贡献应定位为策略更新路径的受控比较与机制边界分析。</p>
+<div class="lead"><b>中期判断：</b>六方法的共同 1M 协议比较已完成。报告以 AUC、最后阶段均值和独立 held-out 为主要证据；“Best”仅作探索性描述，不作为泛化性能或方法优劣的主判据。</div>
+
+<h2>一、研究问题与假设</h2>
+<h3>1.1 问题背景</h3>
+<p>REDQ 通过较大的评论家集成与较高更新—数据比提升样本效率，DroQ 使用 Dropout 和归一化控制集成规模带来的成本。CrossQ 的关键设计是在 UTD=1 的设置下取消目标评论家网络、保留双 Q 评论家，并在当前转移与自举目标输入之间联合前向，以共享归一化统计量。此处“取消目标网络”不等于取消双评论家。</p>
+<p>策略更新还会查询 Q(s, π(s))。该策略动作分布并非完全未被评论家统计量见过：自举批中已经含有 π(s′)。更精确的研究问题是，当前状态上的策略动作批 (s, π(s)) 是否应直接参与策略更新当步的归一化统计估计，以及这种统计上下文变化会如何影响策略梯度和学习表现。</p>
+<h3>1.2 可证伪假设</h3>
+<ol>
+  <li><b>性能假设：</b>在同一环境交互预算和评估协议下，3N 联合前向可能改善 AUC 或独立 held-out 回报；若只在个别环境有效，应报告环境依赖而非总体胜出。</li>
+  <li><b>机制假设：</b>若收益来自共享统计量而非减少调用次数，分组统计的等量批处理对照应不能复现该收益；该机制仍需单独消融确认。</li>
+  <li><b>计算假设：</b>第三批提高演员更新步的批量样本数，不应仅凭“调用次数减少”推断 FLOPs、墙钟或显存改善，必须读取同协议运行数据验证。</li>
+</ol>
+
+<h2>二、方法与实现</h2>
+<h3>2.1 CrossQ 更新目标</h3>
+<p>对回放样本 (s,a,r,s′,d)，策略分别在 s′ 和 s 上采样动作 a′ 与 aπ。TD 目标与两评论家损失为：</p>
+<p class="center"><b>y = r + γ(1−d) · sg[min(Q₁(s′,a′), Q₂(s′,a′)) − α log π(a′|s′)]</b></p>
+<p class="center"><b>L<sub>Q</sub> = Σ<sub>j=1,2</sub> E[(Q<sub>j</sub>(s,a) − y)²]</b></p>
+<p>策略损失为 L<sub>π</sub> = E[α log π(aπ|s) − min<sub>j</sub> Q<sub>j</sub>(s,aπ)]。策略反向传播需要通过 Q 对动作求导，但不应将策略损失梯度累积到评论家参数。第三批联合前向会使 BN 输出依赖同批样本，因此它并非与原实现代数等价的单纯加速，而是统计量处理方式的有意改变。</p>
+<h3>2.2 3B 更新路径</h3>
+<p>非策略更新步按 CrossQ 使用 2N 批；每隔三个评论家更新的一次策略更新步，将 B=(s,a)、T=(s′,a′)、P=(s,π(s)) 拼为 3N，一次评论家前向产生各批输出。演员损失只读取 P 对应的输出，评论家损失只使用 B 与 T。策略和评论家损失都依据同一份更新前评论家参数快照计算，再按既定顺序更新，从而避免把评论家先更新后再评估策略的顺序差异混入方法比较。</p>
+<p>Original 3B 的 EMA 变体仅对评估/部署用演员参数及浮点 BatchRenorm 统计量做指数滑动平均；在线采样和训练仍使用在线演员。主 EMA 配置在 100k 更新后启用，半衰期为 25k 更新。50k staged 条件把 3B 的起点延至 50k；TDEMA-50K 则在 50k 后同时启用双熵校正目标与 EMA 演员。</p>
+<h3>2.3 比较方法</h3>
+<table width="100%">
+<thead><tr><th>方法</th><th>策略更新路径</th><th>附加处理</th><th>比较目的</th></tr></thead>
+<tbody>
+<tr><td>CrossQ</td><td>评论家 2N；策略路径单独前向</td><td>无 EMA</td><td>基线</td></tr>
+<tr><td>Original 3B</td><td>演员更新步采用 B/T/P 三批联合统计</td><td>无 EMA</td><td>检验三批共享本身</td></tr>
+<tr><td>CrossQ + EMA</td><td>保持 CrossQ 在线训练路径</td><td>100k 后启用 EMA，半衰期 25k</td><td>隔离评估演员 EMA 的影响</td></tr>
+<tr><td>Original 3B + EMA</td><td>演员更新步采用 B/T/P 联合统计</td><td>匹配 EMA 日程</td><td>检验匹配 EMA 下的 3B 效应</td></tr>
+<tr><td>50k staged Original 3B + EMA</td><td>前 50k 按基线路径，之后启用 3B</td><td>匹配 EMA 日程</td><td>检验延迟启用能否改善早期训练</td></tr>
+<tr><td>TDEMA-50K</td><td>50k 后启用双目标策略目标</td><td>50k 起双目标；100k 起 EMA</td><td>检验联合目标与 EMA 的组合</td></tr>
+</tbody>
+</table>
+
+<h2>三、实验协议与数据完整性</h2>
+<table width="100%">
+<thead><tr><th>项目</th><th>固定设置</th></tr></thead>
+<tbody>
+<tr><td>任务</td><td>Ant-v4、Hopper-v4、Walker2d-v4</td></tr>
+<tr><td>种子</td><td>25–29；各方法使用匹配种子</td></tr>
+<tr><td>训练预算</td><td>每个 run 1,000,000 环境交互步</td></tr>
+<tr><td>周期评估</td><td>每 10,000 步一次，每次固定 5 回合</td></tr>
+<tr><td>独立终评</td><td>训练结束后 20 回合 held-out 评估</td></tr>
+<tr><td>网络与更新</td><td>评论家隐藏层宽度 2048；批大小 256；策略延迟 3；学习率 0.001</td></tr>
+<tr><td>总规模</td><td>6 方法 × 3 环境 × 5 种子 = 90 runs</td></tr>
+</tbody>
+</table>
+<p>六方法主表采用同一环境、同一种子和同一评价协议进行配对比较。所有 90 个 run 均达到 1M 步；Original 3B 无 EMA 的 15 个新增 run 经检查全部完成且未数值发散。比值为“该方法五种子均值 / 同环境 CrossQ 五种子均值”，不是逐种子百分比的平均。由于报告重点是配对设计与结果方向，表格保留相对值；结论同时查看原始实验日志、配对胜率和独立终评，避免只凭单一比例作判断。</p>
+
+<h2>四、1M 主结果</h2>
+<p>下表所有数值均以同环境 CrossQ=100%。Final 为最后阶段评估表现的汇总；AUC 汇总训练过程中周期评估曲线；Held-out 为训练后独立 20 回合终评；Best 为单 run 在 100 次周期评估中的最高单次评估值，再对五个种子求均值。</p>
+<p class="small">方法简称：Orig-3B = Original 3B；Orig-3B+EMA = Original 3B + EMA；Staged-50k = 50k staged Original 3B + EMA。</p>
+<h3>Ant-v4</h3>
+<table width="100%">
+<thead><tr><th>方法</th><th>Final</th><th>AUC</th><th>Held-out</th><th>Best</th></tr></thead>
+<tbody>
+<tr><td>CrossQ</td><td class="num">100.0%</td><td class="num">100.0%</td><td class="num">100.0%</td><td class="num">100.0%</td></tr>
+<tr><td>Orig-3B</td><td class="num">107.7%</td><td class="num">118.0%</td><td class="num">105.2%</td><td class="num">105.5%</td></tr>
+<tr><td>CrossQ + EMA</td><td class="num">102.6%</td><td class="num">100.7%</td><td class="num">100.7%</td><td class="num">100.5%</td></tr>
+<tr><td>Orig-3B + EMA</td><td class="num">107.4%</td><td class="num">118.9%</td><td class="num">106.8%</td><td class="num">105.6%</td></tr>
+<tr><td>Staged-50k</td><td class="num">103.9%</td><td class="num">109.4%</td><td class="num">102.4%</td><td class="num">101.3%</td></tr>
+<tr><td>TDEMA-50K</td><td class="num">97.9%</td><td class="num">99.9%</td><td class="num">96.9%</td><td class="num">96.9%</td></tr>
+</tbody>
+</table>
+<h3>Hopper-v4</h3>
+<table width="100%">
+<thead><tr><th>方法</th><th>Final</th><th>AUC</th><th>Held-out</th><th>Best</th></tr></thead>
+<tbody>
+<tr><td>CrossQ</td><td class="num">100.0%</td><td class="num">100.0%</td><td class="num">100.0%</td><td class="num">100.0%</td></tr>
+<tr><td>Orig-3B</td><td class="num">110.9%</td><td class="num">96.5%</td><td class="num">120.6%</td><td class="num">100.6%</td></tr>
+<tr><td>CrossQ + EMA</td><td class="num">126.2%</td><td class="num">120.3%</td><td class="num">137.9%</td><td class="num">99.8%</td></tr>
+<tr><td>Orig-3B + EMA</td><td class="num">128.7%</td><td class="num">114.6%</td><td class="num">147.6%</td><td class="num">98.0%</td></tr>
+<tr><td>Staged-50k</td><td class="num">116.8%</td><td class="num">114.0%</td><td class="num">130.8%</td><td class="num">99.7%</td></tr>
+<tr><td>TDEMA-50K</td><td class="num">129.2%</td><td class="num">115.9%</td><td class="num">141.6%</td><td class="num">101.1%</td></tr>
+</tbody>
+</table>
+<h3>Walker2d-v4</h3>
+<table width="100%">
+<thead><tr><th>方法</th><th>Final</th><th>AUC</th><th>Held-out</th><th>Best</th></tr></thead>
+<tbody>
+<tr><td>CrossQ</td><td class="num">100.0%</td><td class="num">100.0%</td><td class="num">100.0%</td><td class="num">100.0%</td></tr>
+<tr><td>Orig-3B</td><td class="num">92.9%</td><td class="num">93.8%</td><td class="num">89.8%</td><td class="num">91.9%</td></tr>
+<tr><td>CrossQ + EMA</td><td class="num">103.1%</td><td class="num">105.4%</td><td class="num">102.1%</td><td class="num">100.4%</td></tr>
+<tr><td>Orig-3B + EMA</td><td class="num">94.4%</td><td class="num">97.8%</td><td class="num">93.8%</td><td class="num">91.8%</td></tr>
+<tr><td>Staged-50k</td><td class="num">102.0%</td><td class="num">106.8%</td><td class="num">100.9%</td><td class="num">99.5%</td></tr>
+<tr><td>TDEMA-50K</td><td class="num">101.8%</td><td class="num">106.1%</td><td class="num">100.6%</td><td class="num">98.7%</td></tr>
+</tbody>
+</table>
+<p class="small">注：比值采用五种子均值之比；同环境 CrossQ 的各项指标均归一化为 100%。表格中的比值用于比较相对变化，不替代原始回报、方差或置信区间。</p>
+
+<h2>五、结果解读</h2>
+<h3>5.1 Original 3B（无 EMA）：有明显任务依赖性</h3>
+<p>Ant 上 Final、AUC、Held-out 分别为 CrossQ 的 107.7%、118.0%、105.2%，三个指标的配对胜率均为 5/5。Hopper 上 Final 和 Held-out 分别为 110.9% 与 120.6%，但 AUC 为 96.5%；对应配对胜率依次为 3/5、2/5、3/5。Walker2d 三项分别为 92.9%、93.8%、89.8%，配对胜率均为 1/5。该结果是第三批策略输入影响性能的直接证据，同时也明确否定“3B 在所有环境普遍更好”的简单结论。</p>
+<h3>5.2 EMA 与 3B 的作用不能混为一谈</h3>
+<p>CrossQ + EMA 相对 CrossQ 的 AUC 均值在 Ant 近于持平（100.7%），在 Hopper 和 Walker2d 分别为 120.3% 和 105.4%，但均值变化在任务间不均匀。匹配 EMA 的 Original 3B + EMA 相对 CrossQ + EMA，在 AUC / Held-out 上 Ant 变化为 +18.0% / +6.1%，Hopper 为 −4.7% / +7.1%，Walker2d 为 −7.2% / −8.2%。因此，EMA 与三批统计共享具有不同作用路径，不应把 EMA 变体的优势归因于 3B 本身。</p>
+<h3>5.3 分阶段与双目标方法</h3>
+<p>50k staged Original 3B + EMA 在 Walker2d 的 AUC 和 Held-out 分别达到 106.8% 与 100.9%，但在 Ant 和 Hopper 的指标组合并未全面超过对应 CrossQ 基线。TDEMA-50K 在 Hopper 的 Final / Held-out 高于 CrossQ，在 Walker2d 的 AUC / Held-out 略高；Ant 的 AUC 为 99.9%，Held-out 为 96.9%，与 100% 基线近似持平或略低。早期五种子 300k 验证中 TDEMA-50K 曾在三环境的 AUC 和 held-out 均超过配对 CrossQ；扩展到 1M 后 Ant 的优势未保持，说明结论受训练时域与环境影响，不能把 300k 筛选结果外推为 1M 普遍优势。</p>
+<div class="callout"><b>关于 Best：</b>Best 是从每个 run 的 100 次周期评估中挑出的最大值，含有明显的多重选择偏差，且被选中的 checkpoint 未再通过独立 held-out seeds 复评。因此它仅用于描述训练期间曾达到的峰值，不代表最终策略或泛化性能；主要判断依据应为 AUC、最后阶段评估和 held-out。</div>
+
+<h2>六、有效性边界与风险</h2>
+<ul>
+  <li><b>样本量：</b>每个主条件 5 个配对种子，足以呈现趋势和配对胜率，但不宜把百分比变化解释为高精度总体效应。后续应补充 bootstrap 区间或更多种子。</li>
+  <li><b>任务范围：</b>当前只覆盖三项 MuJoCo 任务；结论不自动推广到其他连续控制基准、视觉任务或不同网络规模。</li>
+  <li><b>Best 选择：</b>最大周期评估值经多次挑选，存在乐观偏差，不能作为主指标。</li>
+  <li><b>机制归因：</b>3N 同时改变批统计构成、单次张量大小和调用结构。需以分组统计对照区分共享统计量效应与纯工程批处理效应。</li>
+  <li><b>计算开销：</b>演员更新时实际处理约 3N 样本，理论计算量不因前向调用减少而自动下降。墙钟、吞吐率、峰值显存须从统一计时口径的日志单独汇总。</li>
+  <li><b>版本可复现性：</b>最终归档需补齐环境锁定文件、软件与驱动版本、运行命令、随机种子清单及评估配置。</li>
+</ul>
+
+<h2>七、后续研究计划</h2>
+<table width="100%">
+<thead><tr><th>阶段</th><th>工作内容</th><th>验收产物</th></tr></thead>
+<tbody>
+<tr><td>第一阶段：数据复核</td><td>统一提取 90 个 run 的逐步回报、AUC、最后阶段与 held-out 原始值，补算配对差值和置信区间。</td><td>可追溯的汇总表与绘图脚本</td></tr>
+<tr><td>第二阶段：机制消融</td><td>实现等量批处理但分组统计的 A1 对照；按预注册方式检验共享统计量是否带来独立增益。</td><td>统计共享与调用结构的区分结果</td></tr>
+<tr><td>第三阶段：计算评估</td><td>使用相同硬件与计时边界，汇总墙钟、环境步吞吐、更新吞吐、峰值显存和发散率。</td><td>计算成本与性能联合表</td></tr>
+<tr><td>第四阶段：复现归档</td><td>锁定 Python、PyTorch、CUDA、Gymnasium、MuJoCo 版本，保存配置、日志、检查点与评估种子。</td><td>可复现实验包与运行说明</td></tr>
+<tr><td>第五阶段：结题写作</td><td>依据预设判定标准汇报正结果、负结果和任务依赖性，避免只展示最佳曲线。</td><td>论文式报告、图表与答辩材料</td></tr>
+</tbody>
+</table>
+
+<h2>八、阶段性结论</h2>
+<ol>
+  <li>CrossQ 复现及六方法的 1M 配对主比较已完成，覆盖 3 个环境、5 个种子，共 90 个运行，Original 3B 无 EMA 的新增矩阵 15/15 完成且未数值发散。</li>
+  <li>Original 3B 的效果具有环境依赖性：Ant 指标改善，Hopper 指标分化，Walker2d 指标回退。当前证据不支持把 3B 宣称为跨任务通用改进。</li>
+  <li>EMA、延迟启用 3B 与 TDEMA 的结果也因环境及训练时域而异；应分别报告，不将不同机制的收益混合归因。</li>
+  <li>后续工作的重点是统计共享机制消融、配对不确定性估计和计算成本实测。若受控消融不能证明统一性能收益，应将课题贡献界定为规范的实现、机制分析和适用边界，而非强行提出正向结论。</li>
+</ol>
+
+<h2>参考文献</h2>
+<ol>
+  <li>Bhatt A, Palenicek D, Belousov B, et al. CrossQ: Batch Normalization in Deep Reinforcement Learning for Greater Sample Efficiency and Simplicity. ICLR, 2024.</li>
+  <li>Ioffe S. Batch Renormalization: Towards Reducing Minibatch Dependence in Batch-Normalized Networks. NeurIPS, 2017.</li>
+  <li>Chen X, Wang C, Zhou Z, Ross K W. Randomized Ensembled Double Q-Learning: Learning Fast Without a Model. ICLR, 2021.</li>
+  <li>Hiraoka T, Imagawa T, Hashimoto T, Onishi T, Tsuruoka Y. Dropout Q-Functions for Doubly Efficient Reinforcement Learning. ICLR, 2022.</li>
+  <li>Palenicek D, Bhatt A, Belousov B, et al. Scaling Off-Policy Reinforcement Learning with Batch and Weight Normalization. NeurIPS, 2025.</li>
+  <li>Palenicek D, Vogt F, Watson J, Posner I, Peters J. XQC: Well-conditioned Optimization Accelerates Deep Reinforcement Learning. ICLR, 2026.</li>
+</ol>
+<div class="foot">报告依据课题开题设计及截至 2026 年 11 月 9 日完成的实验记录整理。提交前可按学院模板补充导师评语、签字栏及页眉页脚。</div>
+</body>
+</html>
